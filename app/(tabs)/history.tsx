@@ -3,39 +3,127 @@ import { useCallback, useState } from 'react';
 import { FlatList, StyleSheet, Text, View } from 'react-native';
 
 import { COLORS } from '@/constants/colors';
-import { STUDENT_ID } from '@/constants/student';
-import { getAttendanceHistory, type AttendanceRecord } from '@/lib/database';
+import { useAuth } from '@/lib/auth';
+import { getProfile, type Role } from '@/lib/profiles';
+import {
+  getAttendanceHistory,
+  getTeacherEventAttendance,
+  type AttendanceRecord,
+  type TeacherEventAttendance,
+} from '@/lib/attendance';
+
+function shortId(id: string) {
+  return id ? `…${id.slice(-8)}` : 'unknown';
+}
+
+function formatDate(iso: string) {
+  return new Date(iso).toLocaleString();
+}
 
 export default function HistoryScreen() {
-  const [records, setRecords] = useState<AttendanceRecord[]>([]);
+  const { user } = useAuth();
+  const [role, setRole] = useState<Role | null>(null);
+  const [studentRecords, setStudentRecords] = useState<AttendanceRecord[]>([]);
+  const [teacherEvents, setTeacherEvents] = useState<TeacherEventAttendance[]>([]);
   const [loading, setLoading] = useState(true);
 
-  const loadHistory = useCallback(() => {
-    getAttendanceHistory(STUDENT_ID).then((rows) => {
-      setRecords(rows);
+  const load = useCallback(async () => {
+    if (!user) {
       setLoading(false);
-    });
-  }, []);
+      return;
+    }
+    setLoading(true);
+    const profile = await getProfile(user.id);
+    const currentRole = profile?.role ?? 'student';
+    setRole(currentRole);
+
+    if (currentRole === 'teacher') {
+      const events = await getTeacherEventAttendance(user.id);
+      setTeacherEvents(events);
+      setStudentRecords([]);
+    } else {
+      const records = await getAttendanceHistory(user.id);
+      setStudentRecords(records);
+      setTeacherEvents([]);
+    }
+    setLoading(false);
+  }, [user]);
 
   useFocusEffect(
     useCallback(() => {
-      loadHistory();
-    }, [loadHistory])
+      load();
+    }, [load])
   );
 
+  if (loading) {
+    return (
+      <View style={styles.container}>
+        <Text style={styles.title}>Attendance History</Text>
+        <Text style={styles.subtitle}>Loading records...</Text>
+      </View>
+    );
+  }
+  //history view to "teacher"
+  if (role === 'teacher') {
+    return (
+      <View style={styles.container}>
+        <Text style={styles.title}>My Events — Attendance</Text>
+        {teacherEvents.length === 0 ? (
+          <Text style={styles.subtitle}>
+            No events yet. Create an event in the Teacher tab.
+          </Text>
+        ) : (
+          <FlatList
+            data={teacherEvents}
+            keyExtractor={(item) => item.eventId}
+            contentContainerStyle={styles.list}
+            renderItem={({ item }) => (
+              <View style={styles.card}>
+                <View style={styles.cardHeader}>
+                  <Text style={styles.eventTitle}>{item.title}</Text>
+                  <View style={styles.countBadge}>
+                    <Text style={styles.countText}>{item.attendeeCount}</Text>
+                  </View>
+                </View>
+                <Text style={styles.eventMeta}>{item.eventCode}</Text>
+                {item.startTime && (
+                  <Text style={styles.eventMeta}>Start Time: {formatDate(item.startTime)}</Text>
+                )}
+                {item.endTime && (
+                  <Text style={styles.eventMeta}>End Time: {formatDate(item.endTime)}</Text>
+                )}
+                {item.attendees.length === 0 ? (
+                  <Text style={styles.emptyAttendees}>No scans yet.</Text>
+                ) : (
+                  <View style={styles.attendeeList}>
+                    {item.attendees.map((a) => (
+                      <View key={`${item.eventId}-${a.studentId}`} style={styles.attendeeRow}>
+                        <Text style={styles.attendeeId}>
+                          {(a as any).studentName ?? shortId(a.studentId)}
+                        </Text>
+                        <Text style={styles.attendeeTime}>{formatDate(a.scannedAt)}</Text>
+                      </View>
+                    ))}
+                  </View>
+                )}
+              </View>
+            )}
+          />
+        )}
+      </View>
+    );
+  }
+  //history for the  "Student"
   return (
     <View style={styles.container}>
       <Text style={styles.title}>Attendance History</Text>
-
-      {loading ? (
-        <Text style={styles.subtitle}>Loading records...</Text>
-      ) : records.length === 0 ? (
+      {studentRecords.length === 0 ? (
         <Text style={styles.subtitle}>
           No records yet. Scan a QR code to register your attendance.
         </Text>
       ) : (
         <FlatList
-          data={records}
+          data={studentRecords}
           keyExtractor={(item) => String(item.id)}
           contentContainerStyle={styles.list}
           renderItem={({ item }) => (
@@ -49,10 +137,6 @@ export default function HistoryScreen() {
       )}
     </View>
   );
-}
-
-function formatDate(iso: string) {
-  return new Date(iso).toLocaleString();
 }
 
 const styles = StyleSheet.create({
@@ -89,15 +173,61 @@ const styles = StyleSheet.create({
     shadowRadius: 4,
     elevation: 3,
   },
+  cardHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 4,
+  },
   eventTitle: {
     fontSize: 16,
     fontWeight: '600',
     color: COLORS.textPrimary,
-    marginBottom: 4,
+    flex: 1,
+    marginRight: 8,
   },
   eventMeta: {
     fontSize: 13,
     color: COLORS.textSecondary,
     marginTop: 2,
+  },
+  countBadge: {
+    backgroundColor: '#2E7D32',
+    borderRadius: 999,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    minWidth: 28,
+    alignItems: 'center',
+  },
+  countText: {
+    color: '#ffffff',
+    fontSize: 13,
+    fontWeight: '700',
+  },
+  attendeeList: {
+    marginTop: 10,
+    borderTopWidth: 1,
+    borderTopColor: COLORS.border,
+    paddingTop: 8,
+  },
+  attendeeRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    paddingVertical: 4,
+  },
+  attendeeId: {
+    fontSize: 12,
+    color: COLORS.textPrimary,
+    fontWeight: '500',
+  },
+  attendeeTime: {
+    fontSize: 12,
+    color: COLORS.textSecondary,
+  },
+  emptyAttendees: {
+    fontSize: 12,
+    color: COLORS.textSecondary,
+    marginTop: 8,
+    fontStyle: 'italic',
   },
 });
